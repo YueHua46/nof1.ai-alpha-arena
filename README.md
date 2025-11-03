@@ -1,6 +1,6 @@
 # nof1.ai-alpha-arena
 
-The Nof1 AI Trading Bot is an open-source autonomous trading system built by Nof1.ai as part of the Alpha Arena experiment. It trades real crypto on Hyperliquid using deep reinforcement learning, live market signals, and adaptive AI-driven strategy optimization.
+Nof1 AI Trading Bot is an open-source autonomous trading system built by Nof1.ai as part of the Alpha Arena experiment. It trades real crypto on Hyperliquid using deep reinforcement learning, live market signals, and adaptive AI-driven strategy optimization.
 
 <div align="center">
   <a href="../../releases/latest">
@@ -13,7 +13,8 @@ The Nof1 AI Trading Bot is an open-source autonomous trading system built by Nof
 ## 🌍 Project Concept
 
 The bot runs **locally on your PC**, fully autonomous, and does not require servers or external control.  
-You can connect any AI model (ChatGPT, DeepSeek, Qwen, Gemini, Grok, etc.), and the system will use it to trade via the **Hyperliquid API**.
+You can connect any AI model (ChatGPT, DeepSeek, Qwen, Gemini, Grok, etc.), and the system will use it to trade via the **Hyperliquid API** created
+by [nof1.ai](https://nof1.ai)
 
 > 💡 All data and keys are stored **only on your device** — no cloud transfers, no leaks.  
 > Use separate wallets for testing.
@@ -235,4 +236,4 @@ Create an ecosystem where AI **learns, adapts, and trades autonomously**, formin
 
 ---
 
-*Inspired by the Alpha Arena experiment.*
+*Inspired by the [Alpha Arena](https://nof1.ai) experiment.*
