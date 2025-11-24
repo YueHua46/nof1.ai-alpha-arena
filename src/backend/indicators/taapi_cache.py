@@ -27,7 +27,7 @@ class TAAPICache:
         """
         self.ttl = ttl
         self._cache: Dict[str, Dict[str, Any]] = {}
-        logger.info(f"TAAPI Cache initialized with TTL={ttl}s")
+        logger.info(f"TAAPI 缓存初始化完成，过期时间：{ttl} 秒")
     
     def get(self, asset: str, interval: str) -> Optional[Dict[str, Any]]:
         """
@@ -43,18 +43,18 @@ class TAAPICache:
         key = f"{asset}:{interval}"
         
         if key not in self._cache:
-            logger.debug(f"Cache MISS: {key}")
+            logger.debug(f"缓存未命中：{key}")
             return None
         
         entry = self._cache[key]
         age = time.time() - entry['timestamp']
         
         if age > self.ttl:
-            logger.debug(f"Cache EXPIRED: {key} (age: {age:.1f}s)")
+            logger.debug(f"缓存已过期：{key}（存在时间：{age:.1f} 秒）")
             del self._cache[key]
             return None
         
-        logger.debug(f"Cache HIT: {key} (age: {age:.1f}s)")
+        logger.debug(f"缓存命中：{key}（存在时间：{age:.1f} 秒）")
         return entry['data']
     
     def set(self, asset: str, interval: str, data: Dict[str, Any]) -> None:
@@ -73,13 +73,13 @@ class TAAPICache:
             'data': data
         }
         
-        logger.debug(f"Cache SET: {key}")
+        logger.debug(f"缓存写入：{key}")
     
     def clear(self) -> None:
         """Clear all cached data"""
         count = len(self._cache)
         self._cache.clear()
-        logger.info(f"Cache cleared ({count} entries removed)")
+        logger.info(f"已清空 TAAPI 缓存，共移除 {count} 条记录")
     
     def stats(self) -> Dict[str, Any]:
         """

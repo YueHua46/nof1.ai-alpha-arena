@@ -16,7 +16,7 @@ from src.backend.agent.decision_maker import TradingAgent
 from src.backend.config_loader import CONFIG
 from src.backend.indicators.taapi_client import TAAPIClient
 from src.backend.models.trade_proposal import TradeProposal
-from src.backend.trading.hyperliquid_api import HyperliquidAPI
+from src.backend.trading.okx_api import OKXAPI
 from src.backend.utils.prompt_utils import json_default
 
 
@@ -83,7 +83,7 @@ class TradingBotEngine:
 
         # Initialize trading components
         self.taapi = TAAPIClient()
-        self.hyperliquid = HyperliquidAPI()
+        self.exchange = OKXAPI()
         self.agent = TradingAgent()
 
         # Bot state
@@ -103,7 +103,15 @@ class TradingBotEngine:
         # Manual trading mode
         self.trading_mode = CONFIG.get("trading_mode", "auto").lower()
         self.pending_proposals: List[TradeProposal] = []
-        self.logger.info(f"Trading mode: {self.trading_mode.upper()}")
+        self.logger.info(f"交易模式已设置为：{self.trading_mode.upper()}")
+
+        # Risk management: use a fraction of account value per trade (fallback 10%)
+        raw_fraction = CONFIG.get("position_risk_fraction", 0.1)
+        try:
+            self.position_risk_fraction: float = float(raw_fraction)
+        except (TypeError, ValueError):
+            self.position_risk_fraction = 0.1
+            self.logger.warning(f"position_risk_fraction 配置无效（{raw_fraction}），已回退为 0.1")
 
         # File paths
         self.diary_path = Path("data/diary.jsonl")
@@ -112,7 +120,7 @@ class TradingBotEngine:
     async def start(self):
         """Start the trading bot"""
         if self.is_running:
-            self.logger.warning("Bot already running")
+            self.logger.warning("交易机器人已在运行，忽略重复启动请求")
             return
 
         self.is_running = True
@@ -122,16 +130,16 @@ class TradingBotEngine:
 
         # Get initial account value
         try:
-            user_state = await self.hyperliquid.get_user_state()
+            user_state = await self.exchange.get_user_state()
             self.initial_account_value = user_state.get('total_value', 0.0)
             if self.initial_account_value == 0.0:
                 self.initial_account_value = user_state.get('balance', 10000.0)
         except Exception as e:
-            self.logger.error(f"Failed to get initial account value: {e}")
+            self.logger.error(f"获取初始账户权益失败：{e}")
             self.initial_account_value = 10000.0
 
         self._task = asyncio.create_task(self._main_loop())
-        self.logger.info(f"Bot started - Assets: {self.assets}, Interval: {self.interval}")
+        self.logger.info(f"交易机器人已启动，资产：{self.assets}，周期：{self.interval}")
         self._notify_state_update()
 
     async def stop(self):
@@ -149,7 +157,7 @@ class TradingBotEngine:
             except asyncio.CancelledError:
                 pass
 
-        self.logger.info("Bot stopped")
+        self.logger.info("交易机器人已停止")
         self._notify_state_update()
 
     async def _main_loop(self):
@@ -164,7 +172,7 @@ class TradingBotEngine:
 
                 try:
                     # ===== PHASE 1: Fetch Account State =====
-                    state = await self.hyperliquid.get_user_state()
+                    state = await self.exchange.get_user_state()
                     balance = state['balance']
                     total_value = state['total_value']
 
@@ -174,7 +182,7 @@ class TradingBotEngine:
 
                     sharpe_ratio = self._calculate_sharpe(self.trade_log)
                     
-                    self.logger.debug(f"  Balance: ${balance:,.2f} | Return: {total_return_pct:+.2f}% | Sharpe: {sharpe_ratio:.2f}")
+                    self.logger.debug(f"  余额：${balance:,.2f} | 总收益率：{total_return_pct:+.2f}% | 夏普比率：{sharpe_ratio:.2f}")
 
                     # Update bot state
                     self.state.balance = balance
@@ -187,7 +195,7 @@ class TradingBotEngine:
                     for pos in state['positions']:
                         symbol = pos.get('coin')
                         try:
-                            current_price = await self.hyperliquid.get_current_price(symbol)
+                            current_price = await self.exchange.get_current_price(symbol)
                             enriched_positions.append({
                                 'symbol': symbol,
                                 'quantity': float(pos.get('szi', 0) or 0),
@@ -198,7 +206,7 @@ class TradingBotEngine:
                                 'leverage': pos.get('leverage', {}).get('value', 1) if isinstance(pos.get('leverage'), dict) else pos.get('leverage', 1)
                             })
                         except Exception as e:
-                            self.logger.error(f"Error enriching position for {symbol}: {e}")
+                            self.logger.error(f"丰富持仓信息时出错，标的 {symbol}：{e}")
 
                     self.state.positions = enriched_positions
 
@@ -206,7 +214,7 @@ class TradingBotEngine:
                     recent_diary = self._load_recent_diary(limit=10)
 
                     # ===== PHASE 4: Fetch Open Orders =====
-                    open_orders_raw = await self.hyperliquid.get_open_orders()
+                    open_orders_raw = await self.exchange.get_open_orders()
                     open_orders = []
                     for o in open_orders_raw:
                         order_type_obj = o.get('orderType', {})
@@ -235,7 +243,7 @@ class TradingBotEngine:
                     await self._reconcile_active_trades(state['positions'], open_orders_raw)
 
                     # ===== PHASE 6: Fetch Recent Fills =====
-                    fills_raw = await self.hyperliquid.get_recent_fills(limit=50)
+                    fills_raw = await self.exchange.get_recent_fills(limit=50)
                     recent_fills = []
                     for fill in fills_raw[-20:]:
                         ts = fill.get('time')
@@ -268,10 +276,11 @@ class TradingBotEngine:
 
                     # ===== PHASE 8: Gather Market Data =====
                     market_sections = []
+                    all_assets_ok = True
                     for idx, asset in enumerate(self.assets):
                         try:
                             # Current price
-                            current_price = await self.hyperliquid.get_current_price(asset)
+                            current_price = await self.exchange.get_current_price(asset)
 
                             # Store price history
                             self.price_history[asset].append({
@@ -280,19 +289,13 @@ class TradingBotEngine:
                             })
 
                             # Open interest and funding
-                            oi = await self.hyperliquid.get_open_interest(asset)
-                            funding = await self.hyperliquid.get_funding_rate(asset)
+                            oi = await self.exchange.get_open_interest(asset)
+                            funding = await self.exchange.get_funding_rate(asset)
 
                             # Fetch all indicators using bulk endpoint (2 requests instead of 10)
                             # Note: fetch_asset_indicators() already includes 15s delay between 5m and interval requests
                             # Uses caching to avoid redundant API calls
                             indicators = self.taapi.fetch_asset_indicators(asset)
-                            
-                            # Add delay between assets to respect TAAPI rate limit (1 req/15s)
-                            # Only wait if this is not the last asset
-                            if idx < len(self.assets) - 1:
-                                self.logger.info(f"Waiting 15s before fetching next asset (TAAPI rate limit)...")
-                                await asyncio.sleep(15)
                             
                             # Extract 5m indicators
                             ema20_5m_series = indicators["5m"].get("ema20", [])
@@ -300,9 +303,9 @@ class TradingBotEngine:
                             rsi7_5m_series = indicators["5m"].get("rsi7", [])
                             rsi14_5m_series = indicators["5m"].get("rsi14", [])
 
-                            # Extract long-term indicators (interval from config: 1h, 4h, etc.)
-                            interval = CONFIG.get("interval", "1h")
-                            lt_indicators = indicators.get(interval, {})
+                            # Extract long-term indicators (fixed 4h structural context)
+                            long_term_interval = "4h"
+                            lt_indicators = indicators.get(long_term_interval, {})
                             lt_ema20 = lt_indicators.get("ema20")
                             lt_ema50 = lt_indicators.get("ema50")
                             lt_atr3 = lt_indicators.get("atr3")
@@ -341,64 +344,81 @@ class TradingBotEngine:
                             })
 
                         except Exception as e:
-                            self.logger.error(f"Error gathering market data for {asset}: {e}")
+                            all_assets_ok = False
+                            self.logger.error(f"获取资产 {asset} 市场数据时出错：{e}")
+                    
+                    # ===== PHASE 9 & 10: Build LLM Context and Get Decisions (only if all assets OK) =====
+                    decisions = {"reasoning": "", "trade_decisions": []}
+                    trade_decisions = []
+                    if market_sections and all_assets_ok:
+                        context_payload = OrderedDict([
+                            ("invocation", {
+                                "count": self.invocation_count,
+                                "current_time": datetime.now(UTC).isoformat()
+                            }),
+                            ("account", dashboard),
+                            ("market_data", market_sections),
+                            ("instructions", {
+                                "assets": self.assets,
+                                "note": "Follow the system prompt guidelines strictly"
+                            })
+                        ])
+                        context = json.dumps(context_payload, default=json_default, indent=2)
 
-                    # ===== PHASE 9: Build LLM Context =====
-                    context_payload = OrderedDict([
-                        ("invocation", {
-                            "count": self.invocation_count,
-                            "current_time": datetime.now(UTC).isoformat()
-                        }),
-                        ("account", dashboard),
-                        ("market_data", market_sections),
-                        ("instructions", {
-                            "assets": self.assets,
-                            "note": "Follow the system prompt guidelines strictly"
-                        })
-                    ])
-                    context = json.dumps(context_payload, default=json_default, indent=2)
+                        # Log prompt
+                        with open("data/prompts.log", "a", encoding="utf-8") as f:
+                            f.write(f"\n{'='*80}\n")
+                            f.write(f"Invocation {self.invocation_count} - {datetime.now(UTC).isoformat()}\n")
+                            f.write(f"{'='*80}\n")
+                            f.write(context + "\n")
 
-                    # Log prompt
-                    with open("data/prompts.log", "a", encoding="utf-8") as f:
-                        f.write(f"\n{'='*80}\n")
-                        f.write(f"Invocation {self.invocation_count} - {datetime.now(UTC).isoformat()}\n")
-                        f.write(f"{'='*80}\n")
-                        f.write(context + "\n")
-
-                    # ===== PHASE 10: Get LLM Decision =====
-                    decisions = await asyncio.to_thread(
-                        self.agent.decide_trade, self.assets, context
-                    )
-
-                    # Validate and retry if needed
-                    if not isinstance(decisions, dict) or 'trade_decisions' not in decisions:
-                        self.logger.warning("Invalid decision format, retrying with strict prefix...")
-                        strict_context = (
-                            "Return ONLY the JSON object per the schema. "
-                            "No markdown, no explanation.\n\n" + context
-                        )
-                        decisions = await asyncio.to_thread(
-                            self.agent.decide_trade, self.assets, strict_context
-                        )
-
-                    # Check for all-hold with parse errors
-                    trade_decisions = decisions.get('trade_decisions', [])
-                    if all(
-                        d.get('action') == 'hold' and 'parse error' in d.get('rationale', '').lower()
-                        for d in trade_decisions
-                    ):
-                        self.logger.warning("All holds with parse errors, retrying...")
                         decisions = await asyncio.to_thread(
                             self.agent.decide_trade, self.assets, context
                         )
+
+                        # Validate and retry if needed
+                        if not isinstance(decisions, dict) or 'trade_decisions' not in decisions:
+                            self.logger.warning("LLM 返回的决策格式无效，将使用更严格提示重试一次…")
+                            strict_context = (
+                                "Return ONLY the JSON object per the schema. "
+                                "No markdown, no explanation.\n\n" + context
+                            )
+                            decisions = await asyncio.to_thread(
+                                self.agent.decide_trade, self.assets, strict_context
+                            )
+
+                        # Check for all-hold with parse errors
                         trade_decisions = decisions.get('trade_decisions', [])
 
-                    # Extract reasoning
-                    reasoning = decisions.get('reasoning', '')
-                    if reasoning:
-                        self.logger.info(f"LLM Reasoning: {reasoning[:200]}...")
+                        if trade_decisions:
+                            mapping = {'buy': '买入', 'sell': '卖出', 'hold': '持有'}
+                            summary = []
+                            for decision in trade_decisions:
+                                action = decision.get('action', 'hold')
+                                asset = decision.get('asset', 'N/A')
+                                summary.append(f"{asset}：{mapping.get(action, action)}")
+                            self.logger.info(f"LLM 决策({len(trade_decisions)}条)：{', '.join(summary)}。")
+                        if all(
+                            d.get('action') == 'hold' and 'parse error' in d.get('rationale', '').lower()
+                            for d in trade_decisions
+                        ):
+                            self.logger.warning("LLM 决策全部为“持有”且解析出错，正在重新请求一次…")
+                            decisions = await asyncio.to_thread(
+                                self.agent.decide_trade, self.assets, context
+                            )
+                            trade_decisions = decisions.get('trade_decisions', [])
 
-                    self.state.last_reasoning = decisions
+                        # Extract reasoning
+                        reasoning = decisions.get('reasoning', '')
+                        if reasoning:
+                            self.logger.info(f"LLM 推理摘要：{reasoning[:200]}...")
+
+                        self.state.last_reasoning = decisions
+                    else:
+                        if not market_sections:
+                            self.logger.warning("本轮未能获取任何资产的市场数据，将跳过 LLM 决策。")
+                        elif not all_assets_ok:
+                            self.logger.warning("本轮部分资产市场数据获取失败，将跳过 LLM 决策并在下个周期重试。")
 
                     # ===== PHASE 11: Execute Trades or Create Proposals =====
                     for decision in trade_decisions:
@@ -408,17 +428,37 @@ class TradingBotEngine:
 
                         action = decision.get('action')
                         rationale = decision.get('rationale', '')
-                        allocation = float(decision.get('allocation_usd', 0))
+                        raw_allocation = float(decision.get('allocation_usd', 0))
                         tp_price = decision.get('tp_price')
                         sl_price = decision.get('sl_price')
                         exit_plan = decision.get('exit_plan', '')
                         confidence = decision.get('confidence', 75.0)
 
+                        # ===== Risk Sizing: derive allocation from current account value =====
+                        account_value = self.state.total_value or total_value
+                        # 使用账户总权益的一定比例作为本次下单资金上限（默认 10%）
+                        max_allocation_from_balance = max(account_value * self.position_risk_fraction, 0.0)
+
+                        # 如果 LLM 给出了 allocation_usd，把它当作“目标值”，但不允许超过上限
+                        if raw_allocation > 0:
+                            allocation = min(raw_allocation, max_allocation_from_balance)
+                        else:
+                            allocation = max_allocation_from_balance
+
+                        if allocation <= 0:
+                            self.logger.warning(
+                                f"{asset}：计算后可用下单资金为 0，跳过此次 {action}。"
+                                f" account_value={account_value:.2f}, "
+                                f"position_risk_fraction={self.position_risk_fraction}, "
+                                f"raw_allocation={raw_allocation}"
+                            )
+                            continue
+
                         if action in ['buy', 'sell']:
                             # MANUAL MODE: Create proposal instead of executing
                             if self.trading_mode == "manual":
                                 try:
-                                    current_price = await self.hyperliquid.get_current_price(asset)
+                                    current_price = await self.exchange.get_current_price(asset)
                                     size = allocation / current_price if current_price > 0 else 0
                                     
                                     # Calculate risk/reward
@@ -447,33 +487,33 @@ class TradingBotEngine:
                                     )
                                     
                                     self.pending_proposals.append(proposal)
-                                    self.logger.info(f"[PROPOSAL] Created: {action.upper()} {asset} @ ${current_price:,.2f} (ID: {proposal.id[:8]})")
+                                    self.logger.info(f"[提案] 已创建：{action.upper()} {asset} @ ${current_price:,.2f} (ID: {proposal.id[:8]})")
                                     
                                     # Update state with proposals
                                     self.state.pending_proposals = [p.to_dict() for p in self.pending_proposals if p.is_pending]
                                     
                                 except Exception as e:
-                                    self.logger.error(f"Error creating proposal for {asset}: {e}")
+                                    self.logger.error(f"为资产 {asset} 创建交易提案时出错：{e}")
                                     
                                 continue  # Skip execution in manual mode
                             
                             # AUTO MODE: Execute immediately (original behavior)
                             try:
-                                current_price = await self.hyperliquid.get_current_price(asset)
+                                current_price = await self.exchange.get_current_price(asset)
                                 amount = allocation / current_price if current_price > 0 else 0
 
                                 if amount > 0:
                                     # Place market order
                                     if action == 'buy':
-                                        order_result = await self.hyperliquid.place_buy_order(asset, amount)
+                                        order_result = await self.exchange.place_buy_order(asset, amount)
                                     else:
-                                        order_result = await self.hyperliquid.place_sell_order(asset, amount)
+                                        order_result = await self.exchange.place_sell_order(asset, amount)
 
-                                    self.logger.info(f"Executed {action} {asset}: {amount:.6f} @ {current_price}")
+                                    self.logger.info(f"已执行 {action} {asset}：数量 {amount:.6f}，价格 {current_price}")
 
                                     # Wait and check fills
                                     await asyncio.sleep(1)
-                                    recent_fills_check = await self.hyperliquid.get_recent_fills(limit=5)
+                                    recent_fills_check = await self.exchange.get_recent_fills(limit=5)
                                     filled = any(
                                         f.get('coin') == asset and
                                         abs(float(f.get('sz', 0)) - amount) < 0.0001
@@ -487,26 +527,26 @@ class TradingBotEngine:
                                     if tp_price:
                                         try:
                                             is_buy = (action == 'buy')
-                                            tp_order = await self.hyperliquid.place_take_profit(
+                                            tp_order = await self.exchange.place_take_profit(
                                                 asset, is_buy, amount, tp_price
                                             )
-                                            oids = self.hyperliquid.extract_oids(tp_order)
+                                            oids = self.exchange.extract_oids(tp_order)
                                             tp_oid = oids[0] if oids else None
-                                            self.logger.info(f"Placed TP order for {asset} @ {tp_price}")
+                                            self.logger.info(f"已为 {asset} 下达止盈委托，价格：{tp_price}")
                                         except Exception as e:
-                                            self.logger.error(f"Failed to place TP: {e}")
+                                            self.logger.error(f"下达止盈委托失败：{e}")
 
                                     if sl_price:
                                         try:
                                             is_buy = (action == 'buy')
-                                            sl_order = await self.hyperliquid.place_stop_loss(
+                                            sl_order = await self.exchange.place_stop_loss(
                                                 asset, is_buy, amount, sl_price
                                             )
-                                            oids = self.hyperliquid.extract_oids(sl_order)
+                                            oids = self.exchange.extract_oids(sl_order)
                                             sl_oid = oids[0] if oids else None
-                                            self.logger.info(f"Placed SL order for {asset} @ {sl_price}")
+                                            self.logger.info(f"已为 {asset} 下达止损委托，价格：{sl_price}")
                                         except Exception as e:
-                                            self.logger.error(f"Failed to place SL: {e}")
+                                            self.logger.error(f"下达止损委托失败：{e}")
 
                                     # Update active trades
                                     self.active_trades = [
@@ -556,12 +596,12 @@ class TradingBotEngine:
                                     # (Simplified - actual PnL tracked on position close)
 
                             except Exception as e:
-                                self.logger.error(f"Error executing {action} for {asset}: {e}")
+                                self.logger.error(f"执行 {action} 操作（资产 {asset}）时出错：{e}")
                                 if self.on_error:
                                     self.on_error(f"Trade execution error: {e}")
 
                         elif action == 'hold':
-                            self.logger.info(f"{asset}: HOLD - {rationale}")
+                            self.logger.info(f"{asset}：保持持仓（HOLD），理由：{rationale}")
                             self._write_diary_entry({
                                 'timestamp': datetime.now(UTC).isoformat(),
                                 'asset': asset,
@@ -577,7 +617,7 @@ class TradingBotEngine:
                     self._notify_state_update()
 
                 except Exception as e:
-                    self.logger.error(f"Error in main loop iteration: {e}", exc_info=True)
+                    self.logger.error(f"主循环本次迭代发生错误：{e}", exc_info=True)
                     self.state.error = str(e)
                     if self.on_error:
                         self.on_error(str(e))
@@ -586,9 +626,9 @@ class TradingBotEngine:
                 await asyncio.sleep(self._get_interval_seconds())
 
         except asyncio.CancelledError:
-            self.logger.info("Bot loop cancelled")
+            self.logger.info("交易机器人主循环被取消")
         except Exception as e:
-            self.logger.error(f"Fatal error in bot loop: {e}", exc_info=True)
+            self.logger.error(f"交易机器人主循环发生致命错误：{e}", exc_info=True)
             self.state.error = str(e)
             if self.on_error:
                 self.on_error(str(e))
@@ -609,7 +649,7 @@ class TradingBotEngine:
                 removed.append(trade['asset'])
 
         if removed:
-            self.logger.info(f"Reconciled: removed stale trades for {removed}")
+            self.logger.info(f"对齐本地活跃交易：移除了以下已在交易所关闭的交易记录：{removed}")
             self._write_diary_entry({
                 'timestamp': datetime.now(UTC).isoformat(),
                 'action': 'reconcile',
@@ -646,7 +686,7 @@ class TradingBotEngine:
             try:
                 self.on_state_update(self.state)
             except Exception as e:
-                self.logger.error(f"Error in state update callback: {e}")
+                self.logger.error(f"状态更新回调执行失败：{e}")
 
     def _write_diary_entry(self, entry: Dict):
         """Write entry to diary.jsonl"""
@@ -654,7 +694,7 @@ class TradingBotEngine:
             with open(self.diary_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, default=json_default) + "\n")
         except Exception as e:
-            self.logger.error(f"Failed to write diary entry: {e}")
+            self.logger.error(f"写入交易日志（diary）失败：{e}")
 
     def _load_recent_diary(self, limit: int = 10) -> List[Dict]:
         """Load recent diary entries"""
@@ -673,7 +713,7 @@ class TradingBotEngine:
                             continue
             return entries[-limit:]
         except Exception as e:
-            self.logger.error(f"Failed to load diary: {e}")
+            self.logger.error(f"加载交易日志（diary）失败：{e}")
             return []
 
     def get_state(self) -> BotState:
@@ -700,7 +740,7 @@ class TradingBotEngine:
         """
         try:
             # Cancel all orders for this asset
-            await self.hyperliquid.cancel_all_orders(asset)
+            await self.exchange.cancel_all_orders(asset)
 
             # Find position
             for pos in self.state.positions:
@@ -709,9 +749,9 @@ class TradingBotEngine:
                     if quantity > 0:
                         # Close position (reverse direction)
                         if pos['quantity'] > 0:  # Long position
-                            await self.hyperliquid.place_sell_order(asset, quantity)
+                            await self.exchange.place_sell_order(asset, quantity)
                         else:  # Short position
-                            await self.hyperliquid.place_buy_order(asset, quantity)
+                            await self.exchange.place_buy_order(asset, quantity)
 
                         # Remove from active trades
                         self.active_trades = [
@@ -726,14 +766,14 @@ class TradingBotEngine:
                             'note': 'Position closed manually via GUI'
                         })
 
-                        self.logger.info(f"Manually closed position: {asset}")
+                        self.logger.info(f"已通过界面手动平仓：{asset}")
                         return True
 
-            self.logger.warning(f"No position found to close: {asset}")
+            self.logger.warning(f"未找到可平仓的持仓：{asset}")
             return False
 
         except Exception as e:
-            self.logger.error(f"Failed to close position {asset}: {e}")
+            self.logger.error(f"平仓 {asset} 失败：{e}")
             if self.on_error:
                 self.on_error(f"Failed to close position: {e}")
             return False
@@ -757,12 +797,12 @@ class TradingBotEngine:
         proposal = next((p for p in self.pending_proposals if p.id == proposal_id), None)
         
         if not proposal or not proposal.is_pending:
-            self.logger.warning(f"Proposal {proposal_id} not found or not pending")
+            self.logger.warning(f"未找到待处理的提案：{proposal_id}")
             return False
         
         # Mark as approved
         proposal.approve()
-        self.logger.info(f"[APPROVED] Proposal: {proposal.action.upper()} {proposal.asset} (ID: {proposal_id[:8]})")
+        self.logger.info(f"[已批准] 提案：{proposal.action.upper()} {proposal.asset} (ID: {proposal_id[:8]})")
         
         # Execute asynchronously
         asyncio.create_task(self._execute_proposal(proposal))
@@ -787,12 +827,12 @@ class TradingBotEngine:
         proposal = next((p for p in self.pending_proposals if p.id == proposal_id), None)
         
         if not proposal or not proposal.is_pending:
-            self.logger.warning(f"Proposal {proposal_id} not found or not pending")
+            self.logger.warning(f"未找到待处理的提案：{proposal_id}")
             return False
         
         # Mark as rejected
         proposal.reject(reason or "Rejected by user")
-        self.logger.info(f"[REJECTED] Proposal: {proposal.action.upper()} {proposal.asset} (ID: {proposal_id[:8]})")
+        self.logger.info(f"[已拒绝] 提案：{proposal.action.upper()} {proposal.asset} (ID: {proposal_id[:8]})")
         
         # Write to diary
         self._write_diary_entry({
@@ -818,10 +858,10 @@ class TradingBotEngine:
             proposal: The approved proposal to execute
         """
         try:
-            self.logger.info(f"Executing proposal: {proposal.action.upper()} {proposal.asset}")
+            self.logger.info(f"开始执行提案：{proposal.action.upper()} {proposal.asset}")
             
             # Get fresh price
-            current_price = await self.hyperliquid.get_current_price(proposal.asset)
+            current_price = await self.exchange.get_current_price(proposal.asset)
             amount = proposal.size
             
             if amount <= 0:
@@ -829,17 +869,17 @@ class TradingBotEngine:
             
             # Place market order
             if proposal.action == 'buy':
-                order_result = await self.hyperliquid.place_buy_order(proposal.asset, amount)
+                order_result = await self.exchange.place_buy_order(proposal.asset, amount)
             elif proposal.action == 'sell':
-                order_result = await self.hyperliquid.place_sell_order(proposal.asset, amount)
+                order_result = await self.exchange.place_sell_order(proposal.asset, amount)
             else:
                 raise ValueError(f"Invalid action: {proposal.action}")
             
-            self.logger.info(f"Order placed: {proposal.action} {proposal.asset}: {amount:.6f} @ {current_price}")
+            self.logger.info(f"已根据提案下单：{proposal.action} {proposal.asset}，数量 {amount:.6f}，价格 {current_price}")
             
             # Wait and check fills
             await asyncio.sleep(1)
-            recent_fills = await self.hyperliquid.get_recent_fills(limit=5)
+            recent_fills = await self.exchange.get_recent_fills(limit=5)
             filled = any(
                 f.get('coin') == proposal.asset and
                 abs(float(f.get('sz', 0)) - amount) < 0.0001
@@ -853,26 +893,26 @@ class TradingBotEngine:
             if proposal.tp_price:
                 try:
                     is_buy = (proposal.action == 'buy')
-                    tp_order = await self.hyperliquid.place_take_profit(
+                    tp_order = await self.exchange.place_take_profit(
                         proposal.asset, is_buy, amount, proposal.tp_price
                     )
-                    oids = self.hyperliquid.extract_oids(tp_order)
+                    oids = self.exchange.extract_oids(tp_order)
                     tp_oid = oids[0] if oids else None
-                    self.logger.info(f"Placed TP order @ {proposal.tp_price}")
+                    self.logger.info(f"已根据提案下达止盈委托，价格：{proposal.tp_price}")
                 except Exception as e:
-                    self.logger.error(f"Failed to place TP: {e}")
+                    self.logger.error(f"根据提案下达止盈委托失败：{e}")
             
             if proposal.sl_price:
                 try:
                     is_buy = (proposal.action == 'buy')
-                    sl_order = await self.hyperliquid.place_stop_loss(
+                    sl_order = await self.exchange.place_stop_loss(
                         proposal.asset, is_buy, amount, proposal.sl_price
                     )
-                    oids = self.hyperliquid.extract_oids(sl_order)
+                    oids = self.exchange.extract_oids(sl_order)
                     sl_oid = oids[0] if oids else None
-                    self.logger.info(f"Placed SL order @ {proposal.sl_price}")
+                    self.logger.info(f"已根据提案下达止损委托，价格：{proposal.sl_price}")
                 except Exception as e:
-                    self.logger.error(f"Failed to place SL: {e}")
+                    self.logger.error(f"根据提案下达止损委托失败：{e}")
             
             # Update active trades
             self.active_trades = [
@@ -923,10 +963,10 @@ class TradingBotEngine:
                     'from_proposal': True
                 })
             
-            self.logger.info(f"[SUCCESS] Proposal executed: {proposal.id[:8]}")
+            self.logger.info(f"[成功] 提案已执行：{proposal.id[:8]}")
             
         except Exception as e:
-            self.logger.error(f"Failed to execute proposal {proposal.id}: {e}")
+            self.logger.error(f"执行提案 {proposal.id} 失败：{e}")
             proposal.mark_failed(str(e))
             
             if self.on_error:

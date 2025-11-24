@@ -11,6 +11,7 @@ from datetime import datetime
 
 from src.backend.bot_engine import TradingBotEngine, BotState
 from src.backend.config_loader import CONFIG
+from src.backend.trading.okx_api import OKXAPI
 
 
 class BotService:
@@ -29,6 +30,9 @@ class BotService:
             'interval': CONFIG.get('interval', '5m'),
             'model': CONFIG.get('llm_model', 'x-ai/grok-4')
         }
+        
+        # Load configuration from file if exists (overrides env vars)
+        self._load_config_file()
 
     async def start(self, assets: Optional[List[str]] = None, interval: Optional[str] = None):
         """
@@ -39,16 +43,16 @@ class BotService:
             interval: Trading interval (optional, uses config if not provided)
         """
         if self.bot_engine and self.bot_engine.is_running:
-            self.logger.warning("Bot already running")
+            self.logger.warning("交易机器人已在运行，忽略重复启动请求")
             return
 
         # Validate API keys before starting
         if not CONFIG.get('taapi_api_key'):
             raise ValueError("TAAPI_API_KEY not configured. Please set it in .env file.")
-        if not CONFIG.get('openrouter_api_key'):
-            raise ValueError("OPENROUTER_API_KEY not configured. Please set it in .env file.")
-        if not CONFIG.get('hyperliquid_private_key') and not CONFIG.get('mnemonic'):
-            raise ValueError("HYPERLIQUID_PRIVATE_KEY or MNEMONIC not configured. Please set it in .env file.")
+        if not CONFIG.get('llm_api_key'):
+            raise ValueError("LLM_API_KEY not configured. Please set it in .env file.")
+        if not CONFIG.get('okx_api_key'):
+            raise ValueError("Exchange credentials (OKX) not configured. Please set them in .env file.")
 
         # Use provided values or fall back to config
         assets = assets or self.config['assets']
@@ -70,10 +74,10 @@ class BotService:
             # Start the bot
             await self.bot_engine.start()
 
-            self.logger.info(f"Bot started successfully - Assets: {assets}, Interval: {interval}")
+            self.logger.info(f"交易机器人启动成功，资产：{assets}，周期：{interval}")
 
         except Exception as e:
-            self.logger.error(f"Failed to start bot: {e}", exc_info=True)
+            self.logger.error(f"启动交易机器人失败：{e}", exc_info=True)
             raise
 
     async def stop(self):
@@ -83,9 +87,9 @@ class BotService:
 
         try:
             await self.bot_engine.stop()
-            self.logger.info("Bot stopped successfully")
+            self.logger.info("交易机器人已成功停止")
         except Exception as e:
-            self.logger.error(f"Error stopping bot: {e}", exc_info=True)
+            self.logger.error(f"停止交易机器人时出错：{e}", exc_info=True)
             raise
 
     def is_running(self) -> bool:
@@ -159,7 +163,7 @@ class BotService:
             return entries[-limit:]
 
         except Exception as e:
-            self.logger.error(f"Failed to load trade history: {e}")
+            self.logger.error(f"加载成交历史失败：{e}")
             return []
 
     async def close_position(self, asset: str) -> bool:
@@ -173,7 +177,7 @@ class BotService:
             True if successful, False otherwise
         """
         if not self.bot_engine:
-            self.logger.error("Bot engine not initialized")
+            self.logger.error("交易引擎尚未初始化，无法平仓")
             return False
 
         try:
@@ -182,7 +186,7 @@ class BotService:
                 self._add_event(f"Manually closed position: {asset}")
             return success
         except Exception as e:
-            self.logger.error(f"Failed to close position: {e}")
+            self.logger.error(f"平仓失败：{e}")
             return False
 
     def update_config(self, config: Dict):
@@ -199,7 +203,7 @@ class BotService:
         if 'model' in config:
             self.config['model'] = config['model']
 
-        self.logger.info(f"Configuration updated: {self.config}")
+        self.logger.info(f"配置已更新：{self.config}")
 
     def get_assets(self) -> List[str]:
         """Get configured assets list"""
@@ -207,83 +211,39 @@ class BotService:
             return self.bot_engine.get_assets()
         return self.config['assets']
 
-    async def test_api_connections(self) -> Dict[str, bool]:
-        """
-        Test API connections for TAAPI, Hyperliquid, OpenRouter.
-
-        Returns:
-            Dict with API names as keys and connection status as values
-        """
-        results = {}
-
-        try:
-            # Test TAAPI
-            from src.backend.indicators.taapi_client import TAAPIClient
-            taapi = TAAPIClient()
-            try:
-                test_result = taapi.fetch_value("rsi", "BTC/USDT", "5m", params={"period": 14})
-                results['TAAPI'] = test_result is not None
-            except Exception:
-                results['TAAPI'] = False
-
-            # Test Hyperliquid
-            from src.backend.trading.hyperliquid_api import HyperliquidAPI
-            hyperliquid = HyperliquidAPI()
-            try:
-                price = await hyperliquid.get_current_price("BTC")
-                results['Hyperliquid'] = price is not None and price > 0
-            except Exception:
-                results['Hyperliquid'] = False
-
-            # Test OpenRouter (via agent)
-            from src.backend.agent.decision_maker import TradingAgent
-            agent = TradingAgent()
-            try:
-                # Simple test call (won't actually trade)
-                results['OpenRouter'] = True  # If initialization succeeded
-            except Exception:
-                results['OpenRouter'] = False
-
-        except Exception as e:
-            self.logger.error(f"Error testing connections: {e}")
-
-        return results
-
     async def refresh_market_data(self) -> bool:
         """
-        Manually refresh market data from Hyperliquid without starting the bot.
+        Manually refresh market data from OKX without starting the bot.
         Fetches account state, positions, and market data (prices, funding rates).
         Does NOT fetch TAAPI indicators or run AI analysis.
 
         Returns:
             True if successful, False otherwise
         """
+        okx_api = None
         try:
-            from src.backend.trading.hyperliquid_api import HyperliquidAPI
+            okx_api = OKXAPI()
+            user_state = await okx_api.get_user_state()
 
-            hyperliquid = HyperliquidAPI()
-
-            # Fetch account state (balance, positions)
-            user_state = await hyperliquid.get_user_state()
-
-            # Fetch current market data for all configured assets
             assets = self.get_assets()
             market_data = {}
 
             for asset in assets:
                 try:
-                    price = await hyperliquid.get_current_price(asset)
-                    funding_rate = await hyperliquid.get_funding_rate(asset)
-                    open_interest = await hyperliquid.get_open_interest(asset)
+                    price = await okx_api.get_current_price(asset)
+                    funding_rate = await okx_api.get_funding_rate(asset)
+                    open_interest = await okx_api.get_open_interest(asset)
 
                     market_data[asset] = {
                         'price': price,
                         'funding_rate': funding_rate,
                         'open_interest': open_interest,
-                        'timestamp': datetime.utcnow().isoformat()
+                        'timestamp': datetime.utcnow().isoformat(),
+                        'intraday': {},  # Placeholder to avoid UI errors
+                        'long_term': {}  # Placeholder to avoid UI errors
                     }
                 except Exception as e:
-                    self.logger.warning(f"Failed to fetch market data for {asset}: {e}")
+                    self.logger.warning(f"刷新资产 {asset} 市场数据失败：{e}")
                     market_data[asset] = {
                         'price': None,
                         'funding_rate': None,
@@ -291,34 +251,35 @@ class BotService:
                         'timestamp': datetime.utcnow().isoformat()
                     }
 
-            # Update bot state with fresh data (create new state if bot not running)
             if not self.bot_engine:
-                # Create a temporary bot state for display
                 state = BotState()
             else:
                 state = self.bot_engine.get_state()
 
-            # Update with fresh market data
             state.balance = user_state.get('balance', state.balance)
             state.total_value = user_state.get('total_value', state.total_value)
             state.positions = user_state.get('positions', state.positions)
             state.market_data = market_data
             state.last_update = datetime.utcnow().isoformat()
 
-            # Update state manager
             if self.state_manager:
                 self.state_manager.update(state)
 
-            # Add event to activity feed
             self._add_event(f"📊 Market data refreshed - Balance: ${state.balance:,.2f}")
-
-            self.logger.info("Market data refreshed successfully")
+            self.logger.info("市场数据刷新成功")
             return True
 
         except Exception as e:
-            self.logger.error(f"Failed to refresh market data: {e}", exc_info=True)
+            self.logger.error(f"刷新市场数据失败：{e}", exc_info=True)
             self._add_event(f"❌ Refresh failed: {str(e)}", level="error")
             return False
+
+        finally:
+            if okx_api:
+                try:
+                    await okx_api.close()
+                except Exception:
+                    pass
 
     def approve_proposal(self, proposal_id: str) -> bool:
         """
@@ -331,17 +292,17 @@ class BotService:
             True if approval was sent (async execution), False if bot not running
         """
         if not self.bot_engine or not self.bot_engine.is_running:
-            self.logger.error("Bot engine not running - cannot approve proposal")
+            self.logger.error("交易引擎未运行，无法批准提案")
             return False
 
         try:
             # Schedule async execution
             asyncio.create_task(self.bot_engine.approve_proposal(proposal_id))
             self._add_event(f"✅ Proposal {proposal_id[:8]} approved - executing trade")
-            self.logger.info(f"Proposal approved: {proposal_id}")
+            self.logger.info(f"已批准提案：{proposal_id}")
             return True
         except Exception as e:
-            self.logger.error(f"Failed to approve proposal: {e}")
+            self.logger.error(f"批准提案失败：{e}")
             self._add_event(f"❌ Approval failed: {str(e)}", level="error")
             return False
 
@@ -357,17 +318,17 @@ class BotService:
             True if rejection was sent (async execution), False if bot not running
         """
         if not self.bot_engine or not self.bot_engine.is_running:
-            self.logger.error("Bot engine not running - cannot reject proposal")
+            self.logger.error("交易引擎未运行，无法拒绝提案")
             return False
 
         try:
             # Schedule async execution
             asyncio.create_task(self.bot_engine.reject_proposal(proposal_id, reason))
             self._add_event(f"❌ Proposal {proposal_id[:8]} rejected - {reason}")
-            self.logger.info(f"Proposal rejected: {proposal_id} - Reason: {reason}")
+            self.logger.info(f"已拒绝提案：{proposal_id}，原因：{reason}")
             return True
         except Exception as e:
-            self.logger.error(f"Failed to reject proposal: {e}")
+            self.logger.error(f"拒绝提案失败：{e}")
             self._add_event(f"❌ Rejection failed: {str(e)}", level="error")
             return False
 
@@ -402,7 +363,7 @@ class BotService:
                 for p in proposals
             ]
         except Exception as e:
-            self.logger.error(f"Failed to get pending proposals: {e}")
+            self.logger.error(f"获取待处理提案列表失败：{e}")
             return []
 
     # ===== Callback Handlers =====
@@ -472,10 +433,10 @@ class BotService:
             # Also save to data/config.json for persistence
             self._save_config_file()
 
-            self.logger.info(f"Configuration updated: {list(config_updates.keys())}")
+            self.logger.info(f"配置字段已更新：{list(config_updates.keys())}")
             return True
         except Exception as e:
-            self.logger.error(f"Failed to update configuration: {e}")
+            self.logger.error(f"更新配置失败：{e}")
             return False
 
     async def get_current_config(self) -> Dict:
@@ -488,7 +449,8 @@ class BotService:
                 'llm_model': CONFIG.get('llm_model', 'x-ai/grok-4'),
                 'taapi_key': CONFIG.get('taapi_api_key', ''),
                 'hyperliquid_private_key': CONFIG.get('hyperliquid_private_key', ''),
-                'openrouter_key': CONFIG.get('openrouter_api_key', ''),
+                'llm_api_key': CONFIG.get('llm_api_key', ''),
+                'llm_base_url': CONFIG.get('llm_base_url', ''),
                 'max_position_size': CONFIG.get('max_position_size', 1000),
                 'max_leverage': CONFIG.get('max_leverage', 5),
                 'desktop_notifications': CONFIG.get('desktop_notifications', True),
@@ -497,7 +459,7 @@ class BotService:
                 'telegram_chat_id': CONFIG.get('telegram_chat_id', ''),
             }
         except Exception as e:
-            self.logger.error(f"Failed to get configuration: {e}")
+            self.logger.error(f"读取当前配置失败：{e}")
             return {}
 
     def _save_config_file(self):
@@ -515,7 +477,8 @@ class BotService:
                 'api_keys': {
                     'taapi_api_key': CONFIG.get('taapi_api_key', ''),
                     'hyperliquid_private_key': CONFIG.get('hyperliquid_private_key', ''),
-                    'openrouter_api_key': CONFIG.get('openrouter_api_key', ''),
+                    'llm_api_key': CONFIG.get('llm_api_key', ''),
+                    'llm_base_url': CONFIG.get('llm_base_url', ''),
                 },
                 'risk_management': {
                     'max_position_size': CONFIG.get('max_position_size', 1000),
@@ -532,9 +495,9 @@ class BotService:
             with open(config_path, 'w') as f:
                 json.dump(config_data, f, indent=2)
 
-            self.logger.debug(f"Configuration saved to {config_path}")
+            self.logger.debug(f"配置已保存到 {config_path}")
         except Exception as e:
-            self.logger.error(f"Failed to save configuration file: {e}")
+            self.logger.error(f"保存配置文件失败：{e}")
 
     def _load_config_file(self):
         """Load configuration from data/config.json"""
@@ -559,8 +522,10 @@ class BotService:
                         CONFIG['taapi_api_key'] = data['api_keys']['taapi_api_key']
                     if 'hyperliquid_private_key' in data['api_keys']:
                         CONFIG['hyperliquid_private_key'] = data['api_keys']['hyperliquid_private_key']
-                    if 'openrouter_api_key' in data['api_keys']:
-                        CONFIG['openrouter_api_key'] = data['api_keys']['openrouter_api_key']
+                    if 'llm_api_key' in data['api_keys']:
+                        CONFIG['llm_api_key'] = data['api_keys']['llm_api_key']
+                    if 'llm_base_url' in data['api_keys']:
+                         CONFIG['llm_base_url'] = data['api_keys']['llm_base_url']
 
                 # Load risk management
                 if 'risk_management' in data:
@@ -580,23 +545,22 @@ class BotService:
                     if 'telegram_chat_id' in data['notifications']:
                         CONFIG['telegram_chat_id'] = data['notifications']['telegram_chat_id']
 
-                self.logger.debug(f"Configuration loaded from {config_path}")
+                self.logger.debug(f"已从 {config_path} 读取配置")
         except Exception as e:
-            self.logger.error(f"Failed to load configuration file: {e}")
+            self.logger.error(f"加载配置文件失败：{e}")
 
     async def test_api_connections(self) -> Dict[str, bool]:
         """Test API connections to all services"""
         results = {
             'taapi': False,
-            'hyperliquid': False,
-            'openrouter': False,
+            'okx': False,
+            'llm': False,
         }
 
         try:
             # Test TAAPI
             taapi_key = CONFIG.get('taapi_api_key', '')
             if taapi_key and taapi_key != 'your_taapi_key_here':
-                # Simple test: try to get EMA for BTC
                 import aiohttp
                 async with aiohttp.ClientSession() as session:
                     try:
@@ -607,38 +571,37 @@ class BotService:
                             if resp.status == 200:
                                 results['taapi'] = True
                     except Exception as e:
-                        self.logger.debug(f"TAAPI test failed: {e}")
+                        self.logger.debug(f"TAAPI 连通性测试失败：{e}")
 
-            # Test Hyperliquid
-            hl_key = CONFIG.get('hyperliquid_private_key', '')
-            if hl_key and hl_key != 'your_private_key_here':
-                try:
-                    from src.backend.trading.hyperliquid_api import HyperliquidAPI
-                    hl = HyperliquidAPI()
-                    # Try to get user state
-                    state = await hl.get_user_state()
-                    if state:
-                        results['hyperliquid'] = True
-                except Exception as e:
-                    self.logger.debug(f"Hyperliquid test failed: {e}")
-
-            # Test OpenRouter
-            or_key = CONFIG.get('openrouter_api_key', '')
-            if or_key and or_key != 'your_openrouter_key_here':
-                import aiohttp
-                async with aiohttp.ClientSession() as session:
+            # Test OKX
+            okx_client = None
+            try:
+                okx_client = OKXAPI()
+                assets = self.get_assets()
+                symbol_asset = assets[0] if assets else 'BTC'
+                await okx_client.get_current_price(symbol_asset)
+                results['okx'] = True
+            except Exception as e:
+                self.logger.debug(f"OKX 连通性测试失败：{e}")
+            finally:
+                if okx_client:
                     try:
-                        async with session.post(
-                            'https://openrouter.ai/api/v1/auth/key',
-                            headers={'Authorization': f'Bearer {or_key}'},
-                            timeout=aiohttp.ClientTimeout(total=5)
-                        ) as resp:
-                            if resp.status in [200, 401]:  # 401 means key exists but might be invalid
-                                results['openrouter'] = True
-                    except Exception as e:
-                        self.logger.debug(f"OpenRouter test failed: {e}")
+                        await okx_client.close()
+                    except Exception:
+                        pass
 
+            # Test LLM (AIHubMix)
+            llm_key = CONFIG.get('llm_api_key', '')
+            if llm_key and llm_key != 'your_llm_api_key_here':
+                try:
+                    from src.backend.agent.decision_maker import TradingAgent
+                    agent = TradingAgent()
+                    if agent.api_key:
+                        results['llm'] = True
+                except Exception as e:
+                    self.logger.debug(f"LLM 连通性测试失败：{e}")
+ 
         except Exception as e:
-            self.logger.error(f"Error testing API connections: {e}")
+            self.logger.error(f"测试 API 连通性时出错：{e}")
 
         return results

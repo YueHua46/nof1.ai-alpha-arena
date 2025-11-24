@@ -41,9 +41,12 @@ def create_settings(bot_service: BotService, state_manager: StateManager):
             },
             'api_keys': {
                 'taapi_api_key': CONFIG.get('taapi_api_key') or '',
-                'hyperliquid_private_key': CONFIG.get('hyperliquid_private_key') or '',
-                'hyperliquid_network': CONFIG.get('hyperliquid_network') or 'mainnet',
-                'openrouter_api_key': CONFIG.get('openrouter_api_key') or ''
+                'llm_api_key': CONFIG.get('llm_api_key') or '',
+                'llm_base_url': CONFIG.get('llm_base_url') or 'https://aihubmix.com/v1',
+                'okx_api_key': CONFIG.get('okx_api_key') or '',
+                'okx_secret_key': CONFIG.get('okx_secret_key') or '',
+                'okx_passphrase': CONFIG.get('okx_passphrase') or '',
+                'okx_flag': CONFIG.get('okx_flag', '0') or '0'
             },
             'risk_management': {
                 'max_position_size': 1000,
@@ -115,10 +118,11 @@ def create_settings(bot_service: BotService, state_manager: StateManager):
                     llm_model_select = ui.select(
                         label='Model',
                         options=[
-                            'x-ai/grok-4',
-                            'openai/gpt-4',
-                            'anthropic/claude-3.5-sonnet',
-                            'deepseek/deepseek-chat-v3.1'
+                            'qwen3-max',
+                            'grok-4',
+                            'gpt-5.1',
+                            'claude-3.5-sonnet',
+                            'deepseek-chat-v3.1'
                         ],
                         value=config_data['strategy']['llm_model']
                     ).classes('w-full')
@@ -192,8 +196,8 @@ def create_settings(bot_service: BotService, state_manager: StateManager):
                     ui.label('Connection Status').classes('text-lg font-semibold text-white')
                     with ui.row().classes('gap-4 items-center'):
                         taapi_status = ui.label('TAAPI: 🔴 Not Connected').classes('text-sm')
-                        hyperliquid_status = ui.label('Hyperliquid: 🔴 Not Connected').classes('text-sm')
-                        openrouter_status = ui.label('OpenRouter: 🔴 Not Connected').classes('text-sm')
+                        okx_status = ui.label('OKX: 🔴 Not Connected').classes('text-sm')
+                        llm_status = ui.label('LLM: 🔴 Not Connected').classes('text-sm')
 
                     ui.separator()
 
@@ -210,36 +214,57 @@ def create_settings(bot_service: BotService, state_manager: StateManager):
 
                     ui.separator()
 
-                    # Hyperliquid Key
-                    ui.label('Hyperliquid Private Key').classes('text-lg font-semibold text-white')
-                    hyperliquid_input = ui.input(
-                        label='Private Key',
-                        placeholder='0x...',
-                        value=config_data['api_keys']['hyperliquid_private_key'],
+                    # OKX Credentials
+                    ui.label('OKX Exchange Credentials').classes('text-lg font-semibold text-white')
+                    okx_api_key_input = ui.input(
+                        label='API Key',
+                        value=config_data['api_keys']['okx_api_key'],
                         password=True,
                         password_toggle_button=True
                     ).classes('w-full')
-                    ui.label('Your wallet private key for trading').classes('text-xs text-gray-400')
-
-                    # Network selection
-                    hyperliquid_network = ui.select(
-                        label='Network',
-                        options=['mainnet', 'testnet'],
-                        value=config_data['api_keys']['hyperliquid_network']
+                    okx_secret_input = ui.input(
+                        label='Secret Key',
+                        value=config_data['api_keys']['okx_secret_key'],
+                        password=True,
+                        password_toggle_button=True
                     ).classes('w-full')
+                    okx_passphrase_input = ui.input(
+                        label='Passphrase',
+                        value=config_data['api_keys']['okx_passphrase'],
+                        password=True,
+                        password_toggle_button=True
+                    ).classes('w-full')
+                    okx_flag_select = ui.select(
+                        label='Trading Mode',
+                        options={
+                            '0': 'Demo Trading (0)', 
+                            '1': 'Real Trading (1)'
+                        },
+                        value=str(config_data['api_keys'].get('okx_flag', '0')) if str(config_data['api_keys'].get('okx_flag', '0')) in ['0', '1'] else '0'
+                    ).classes('w-full')
+
+                    ui.label('OKX API credentials for CCXT-based trading').classes('text-xs text-gray-400')
 
                     ui.separator()
 
-                    # OpenRouter Key
-                    ui.label('OpenRouter API Key').classes('text-lg font-semibold text-white')
-                    openrouter_input = ui.input(
-                        label='OpenRouter API Key',
-                        placeholder='sk-or-v1-...',
-                        value=config_data['api_keys']['openrouter_api_key'],
+                    # LLM Configuration
+                    ui.label('LLM Provider Configuration (AIHubMix)').classes('text-lg font-semibold text-white')
+                    
+                    llm_base_url_input = ui.input(
+                        label='LLM Base URL',
+                        placeholder='https://aihubmix.com/v1',
+                        value=config_data['api_keys']['llm_base_url']
+                    ).classes('w-full')
+                    ui.label('API Endpoint for AIHubMix (default: https://aihubmix.com/v1)').classes('text-xs text-gray-400')
+
+                    llm_api_key_input = ui.input(
+                        label='LLM API Key',
+                        placeholder='sk-...',
+                        value=config_data['api_keys']['llm_api_key'],
                         password=True,
                         password_toggle_button=True
                     ).classes('w-full')
-                    ui.label('Get your API key from https://openrouter.ai').classes('text-xs text-gray-400')
+                    ui.label('AIHubMix API Key').classes('text-xs text-gray-400')
 
                     ui.separator()
 
@@ -252,18 +277,34 @@ def create_settings(bot_service: BotService, state_manager: StateManager):
                             # Update environment variables temporarily for testing
                             if taapi_input.value:
                                 os.environ['TAAPI_API_KEY'] = taapi_input.value
-                            if hyperliquid_input.value:
-                                os.environ['HYPERLIQUID_PRIVATE_KEY'] = hyperliquid_input.value
-                            if openrouter_input.value:
-                                os.environ['OPENROUTER_API_KEY'] = openrouter_input.value
+                            if okx_api_key_input.value:
+                                os.environ['OKX_API_KEY'] = okx_api_key_input.value
+                            if okx_secret_input.value:
+                                os.environ['OKX_SECRET_KEY'] = okx_secret_input.value
+                            if okx_passphrase_input.value:
+                                os.environ['OKX_PASSPHRASE'] = okx_passphrase_input.value
+                            if okx_flag_select.value:
+                                os.environ['OKX_FLAG'] = okx_flag_select.value
+                            if llm_api_key_input.value:
+                                os.environ['LLM_API_KEY'] = llm_api_key_input.value
+                            if llm_base_url_input.value:
+                                os.environ['LLM_BASE_URL'] = llm_base_url_input.value
+
+                            CONFIG['taapi_api_key'] = taapi_input.value
+                            CONFIG['okx_api_key'] = okx_api_key_input.value
+                            CONFIG['okx_secret_key'] = okx_secret_input.value
+                            CONFIG['okx_passphrase'] = okx_passphrase_input.value
+                            CONFIG['okx_flag'] = okx_flag_select.value or '0'
+                            CONFIG['llm_api_key'] = llm_api_key_input.value
+                            CONFIG['llm_base_url'] = llm_base_url_input.value
 
                             # Test connections via bot service
                             results = await bot_service.test_api_connections()
 
                             # Update status indicators
-                            taapi_status.text = f"TAAPI: {'🟢 Connected' if results.get('TAAPI', False) else '🔴 Failed'}"
-                            hyperliquid_status.text = f"Hyperliquid: {'🟢 Connected' if results.get('Hyperliquid', False) else '🔴 Failed'}"
-                            openrouter_status.text = f"OpenRouter: {'🟢 Connected' if results.get('OpenRouter', False) else '🔴 Failed'}"
+                            taapi_status.text = f"TAAPI: {'🟢 Connected' if results.get('taapi', False) else '🔴 Failed'}"
+                            okx_status.text = f"OKX: {'🟢 Connected' if results.get('okx', False) else '🔴 Failed'}"
+                            llm_status.text = f"LLM: {'🟢 Connected' if results.get('llm', False) else '🔴 Failed'}"
 
                             # Show summary notification
                             connected_count = sum(1 for v in results.values() if v)
@@ -284,19 +325,39 @@ def create_settings(bot_service: BotService, state_manager: StateManager):
                         try:
                             # Update config data
                             config_data['api_keys']['taapi_api_key'] = taapi_input.value
-                            config_data['api_keys']['hyperliquid_private_key'] = hyperliquid_input.value
-                            config_data['api_keys']['hyperliquid_network'] = hyperliquid_network.value
-                            config_data['api_keys']['openrouter_api_key'] = openrouter_input.value
+                            config_data['api_keys']['okx_api_key'] = okx_api_key_input.value
+                            config_data['api_keys']['okx_secret_key'] = okx_secret_input.value
+                            config_data['api_keys']['okx_passphrase'] = okx_passphrase_input.value
+                            config_data['api_keys']['okx_flag'] = okx_flag_select.value
+                            config_data['api_keys']['llm_api_key'] = llm_api_key_input.value
+                            config_data['api_keys']['llm_base_url'] = llm_base_url_input.value
+
+                            # Keep CONFIG dict in sync with saved values
+                            CONFIG['taapi_api_key'] = taapi_input.value
+                            CONFIG['okx_api_key'] = okx_api_key_input.value
+                            CONFIG['okx_secret_key'] = okx_secret_input.value
+                            CONFIG['okx_passphrase'] = okx_passphrase_input.value
+                            CONFIG['okx_flag'] = okx_flag_select.value or '0'
+                            CONFIG['llm_api_key'] = llm_api_key_input.value
+                            CONFIG['llm_base_url'] = llm_base_url_input.value
 
                             # Save to file
                             if save_config(config_data):
                                 # Update environment variables
                                 if taapi_input.value:
                                     os.environ['TAAPI_API_KEY'] = taapi_input.value
-                                if hyperliquid_input.value:
-                                    os.environ['HYPERLIQUID_PRIVATE_KEY'] = hyperliquid_input.value
-                                if openrouter_input.value:
-                                    os.environ['OPENROUTER_API_KEY'] = openrouter_input.value
+                                if okx_api_key_input.value:
+                                    os.environ['OKX_API_KEY'] = okx_api_key_input.value
+                                if okx_secret_input.value:
+                                    os.environ['OKX_SECRET_KEY'] = okx_secret_input.value
+                                if okx_passphrase_input.value:
+                                    os.environ['OKX_PASSPHRASE'] = okx_passphrase_input.value
+                                if okx_flag_select.value:
+                                    os.environ['OKX_FLAG'] = okx_flag_select.value
+                                if llm_api_key_input.value:
+                                    os.environ['LLM_API_KEY'] = llm_api_key_input.value
+                                if llm_base_url_input.value:
+                                    os.environ['LLM_BASE_URL'] = llm_base_url_input.value
 
                                 ui.notify('API keys saved successfully!', type='positive')
                                 ui.notify('Note: Restart the bot for changes to take effect', type='info')
@@ -517,10 +578,15 @@ def create_settings(bot_service: BotService, state_manager: StateManager):
     async def load_initial_config():
         """Load current bot configuration on page initialization"""
         try:
-            current_config = await bot_service.get_current_config() if hasattr(bot_service, 'get_current_config') else None
-            if current_config:
-                # Update UI with current config
-                pass
+            # Test connections automatically if keys are present
+            if config_data['api_keys']['taapi_api_key'] or config_data['api_keys']['okx_api_key']:
+                # Don't show notification on auto-load to avoid spam
+                results = await bot_service.test_api_connections()
+                
+                # Update status indicators
+                taapi_status.text = f"TAAPI: {'🟢 Connected' if results.get('taapi', False) else '🔴 Failed'}"
+                okx_status.text = f"OKX: {'🟢 Connected' if results.get('okx', False) else '🔴 Failed'}"
+                llm_status.text = f"LLM: {'🟢 Connected' if results.get('llm', False) else '🔴 Failed'}"
         except Exception as e:
             pass  # Fail silently on initial load
 

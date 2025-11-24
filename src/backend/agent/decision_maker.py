@@ -13,18 +13,21 @@ class TradingAgent:
     def __init__(self):
         """Initialize LLM configuration, metadata headers, and indicator helper."""
         self.model = CONFIG["llm_model"]
-        self.api_key = CONFIG["openrouter_api_key"]
-        base = CONFIG["openrouter_base_url"]
-        self.base_url = f"{base}/chat/completions"
-        self.referer = CONFIG.get("openrouter_referer")
-        self.app_title = CONFIG.get("openrouter_app_title")
+        self.api_key = CONFIG["llm_api_key"]
+        base = CONFIG["llm_base_url"].rstrip('/')
+        # Normalize base URL: if it doesn't end in /chat/completions, append it
+        if not base.endswith("/chat/completions"):
+            self.base_url = f"{base}/chat/completions"
+        else:
+            self.base_url = base
+            
         self.taapi = TAAPIClient()
         # Fast/cheap sanitizer model to normalize outputs on parse failures
         self.sanitize_model = CONFIG.get("sanitize_model") or "openai/gpt-5"
 
         # Warn if using a model that may not support tools
         if ":free" in self.model.lower() or "deepseek" in self.model.lower():
-            logging.info(f"[INFO] Using model {self.model} - dynamic tool use may not be available. Bot will work with pre-fetched indicators only.")
+            logging.info(f"[信息] 当前使用模型 {self.model}，可能不支持动态工具调用，机器人将仅依赖预先获取的技术指标。")
 
     def decide_trade(self, assets, context):
         """Decide for multiple assets in one call.
@@ -42,6 +45,7 @@ class TradingAgent:
         """Dispatch decision request to the LLM and enforce output contract."""
         system_prompt = (
             "You are a rigorous QUANTITATIVE TRADER and interdisciplinary MATHEMATICIAN-ENGINEER optimizing risk-adjusted returns for perpetual futures under real execution, margin, and funding constraints.\n"
+            "You MUST respond in Simplified Chinese for all natural language content (reasoning, rationale, exit_plan, explanations). Do not use English sentences except for asset tickers (e.g., BTC, ETH, SOL), API names, or numeric values.\n"
             "You will receive market + account context for SEVERAL assets, including:\n"
             f"- assets = {json.dumps(assets)}\n"
             "- per-asset intraday (5m) and higher-timeframe (4h) metrics\n"
@@ -121,24 +125,20 @@ class TradingAgent:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        if self.referer:
-            headers["HTTP-Referer"] = self.referer
-        if self.app_title:
-            headers["X-Title"] = self.app_title
 
         def _post(payload):
-            """Send a POST request to OpenRouter, logging request and response metadata."""
+            """Send a POST request to LLM provider, logging request and response metadata."""
             # Log the full request payload for debugging
-            logging.info("Sending request to OpenRouter (model: %s)", payload.get('model'))
+            logging.info("正在向 LLM 发送请求（模型：%s）", payload.get('model'))
             with open("llm_requests.log", "a", encoding="utf-8") as f:
                 f.write(f"\n\n=== {datetime.now()} ===\n")
                 f.write(f"Model: {payload.get('model')}\n")
                 f.write(f"Headers: {json.dumps({k: v for k, v in headers.items() if k != 'Authorization'})}\n")
                 f.write(f"Payload:\n{json.dumps(payload, indent=2)}\n")
             resp = requests.post(self.base_url, headers=headers, json=payload, timeout=60)
-            logging.info("Received response from OpenRouter (status: %s)", resp.status_code)
+            logging.info("已收到 LLM 响应（HTTP 状态码：%s）", resp.status_code)
             if resp.status_code != 200:
-                logging.error("OpenRouter error: %s - %s", resp.status_code, resp.text)
+                logging.error("LLM error: %s - %s", resp.status_code, resp.text)
                 with open("llm_requests.log", "a", encoding="utf-8") as f:
                     f.write(f"ERROR Response: {resp.status_code} - {resp.text}\n")
             resp.raise_for_status()
@@ -283,9 +283,9 @@ class TradingAgent:
                 provider = (err.get("error", {}).get("metadata", {}) or {}).get("provider_name", "")
                 error_message = err.get("error", {}).get("message", "")
 
-                # OpenRouter: Model doesn't support tool use
+                # LLM: Model doesn't support tool use
                 if "no endpoints found" in error_message.lower() and "tool" in error_message.lower():
-                    logging.warning(f"Model {self.model} doesn't support tool use on OpenRouter; retrying without tools.")
+                    logging.warning(f"Model {self.model} doesn't support tool use; retrying without tools.")
                     if allow_tools:
                         allow_tools = False
                         continue

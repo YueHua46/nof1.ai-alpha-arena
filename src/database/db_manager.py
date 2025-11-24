@@ -64,7 +64,7 @@ class DatabaseManager:
 
         # Create tables if they don't exist
         create_tables(self.engine)
-        logger.info(f"Database initialized: {db_url}")
+        logger.info(f"数据库已初始化：{db_url}")
 
     @contextmanager
     def session_scope(self):
@@ -81,7 +81,7 @@ class DatabaseManager:
             session.commit()
         except Exception as e:
             session.rollback()
-            logger.error(f"Database session error: {e}")
+            logger.error(f"数据库会话错误：{e}")
             raise
         finally:
             session.close()
@@ -122,7 +122,7 @@ class DatabaseManager:
             session.add(trade)
             session.flush()
             session.refresh(trade)
-            logger.info(f"Created trade: {trade.id} ({asset} {action})")
+            logger.info(f"已创建交易记录：{trade.id}（{asset} {action}）")
             return trade
 
     def close_trade(
@@ -148,7 +148,7 @@ class DatabaseManager:
 
             session.flush()
             session.refresh(trade)
-            logger.info(f"Closed trade: {trade_id} (PnL: {realized_pnl:.2f}, {realized_pnl_pct:.2f}%)")
+            logger.info(f"已关闭交易：{trade_id}（盈亏：{realized_pnl:.2f}，{realized_pnl_pct:.2f}%）")
             return trade
 
     def get_trade(self, trade_id: int) -> Optional[Trade]:
@@ -252,7 +252,7 @@ class DatabaseManager:
                 position.margin = margin
                 position.liquidation_price = liquidation_price
                 position.trade_id = trade_id
-                logger.debug(f"Updated position: {asset}")
+                logger.debug(f"更新持仓：{asset}")
             else:
                 # Create new position
                 position = Position(
@@ -270,7 +270,7 @@ class DatabaseManager:
                     opened_at=datetime.utcnow(),
                 )
                 session.add(position)
-                logger.info(f"Created position: {asset}")
+                logger.info(f"已创建持仓：{asset}")
 
             session.flush()
             session.refresh(position)
@@ -282,7 +282,7 @@ class DatabaseManager:
             position = session.query(Position).filter(Position.asset == asset).first()
             if position:
                 session.delete(position)
-                logger.info(f"Closed position: {asset}")
+                logger.info(f"已关闭持仓：{asset}")
 
     def get_position(self, asset: str) -> Optional[Position]:
         """Get a position by asset."""
@@ -321,7 +321,7 @@ class DatabaseManager:
             session.add(entry)
             session.flush()
             session.refresh(entry)
-            logger.debug(f"Created diary entry: {asset} {action}")
+            logger.debug(f"已写入交易日记：{asset} {action}")
             return entry
 
     def get_diary_entries(
@@ -401,7 +401,7 @@ class DatabaseManager:
             session.add(state)
             session.flush()
             session.refresh(state)
-            logger.debug(f"Saved bot state: balance={balance:.2f}, total_value={total_value:.2f}")
+            logger.debug(f"已保存机器人状态：余额={balance:.2f}，资产总值={total_value:.2f}")
             return state
 
     def get_latest_bot_state(self) -> Optional[BotState]:
@@ -478,7 +478,7 @@ class DatabaseManager:
             session.add(proposal)
             session.flush()
             session.refresh(proposal)
-            logger.info(f"Created trade proposal: {proposal.id} ({asset} {action})")
+            logger.info(f"已创建数据库中的交易提案：{proposal.id}（{asset} {action}）")
             return proposal
 
     def approve_proposal(self, proposal_id: int) -> TradeProposal:
@@ -493,7 +493,7 @@ class DatabaseManager:
 
             session.flush()
             session.refresh(proposal)
-            logger.info(f"Approved proposal: {proposal_id}")
+            logger.info(f"数据库中已标记提案为已批准：{proposal_id}")
             return proposal
 
     def reject_proposal(self, proposal_id: int, reason: Optional[str] = None) -> TradeProposal:
@@ -509,7 +509,7 @@ class DatabaseManager:
 
             session.flush()
             session.refresh(proposal)
-            logger.info(f"Rejected proposal: {proposal_id}")
+            logger.info(f"数据库中已标记提案为已拒绝：{proposal_id}")
             return proposal
 
     def execute_proposal(
@@ -531,7 +531,7 @@ class DatabaseManager:
 
             session.flush()
             session.refresh(proposal)
-            logger.info(f"Executed proposal: {proposal_id}")
+            logger.info(f"数据库中已标记提案为已执行：{proposal_id}")
             return proposal
 
     def get_pending_proposals(self, asset: Optional[str] = None) -> List[TradeProposal]:
@@ -558,7 +558,7 @@ class DatabaseManager:
         import json
 
         if not os.path.exists(jsonl_path):
-            logger.warning(f"JSONL file not found: {jsonl_path}")
+            logger.warning(f"未找到 JSONL 文件：{jsonl_path}")
             return 0
 
         count = 0
@@ -590,10 +590,10 @@ class DatabaseManager:
                         count += 1
 
                 except Exception as e:
-                    logger.error(f"Error migrating JSONL entry: {e}")
+                    logger.error(f"迁移 JSONL 日志条目时出错：{e}")
                     continue
 
-        logger.info(f"[OK] Migrated {count} diary entries from {jsonl_path}")
+        logger.info(f"[OK] 已从 {jsonl_path} 迁移 {count} 条交易日记记录")
         return count
 
     def get_database_stats(self) -> Dict[str, int]:

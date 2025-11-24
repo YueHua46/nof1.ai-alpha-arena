@@ -4,6 +4,7 @@ import requests
 import os
 import time
 import logging
+import json
 from src.backend.config_loader import CONFIG
 from src.backend.indicators.taapi_cache import get_cache
 
@@ -25,8 +26,8 @@ class TAAPIClient:
         self.enable_cache = enable_cache
         self.cache = get_cache(ttl=cache_ttl) if enable_cache else None
 
-    def _get_with_retry(self, url, params, retries=3, backoff=0.5):
-        """Perform a GET request with exponential backoff retry logic."""
+    def _get_with_retry(self, url, params, retries=10, backoff=5.0):
+        """Perform a GET request with retry logic and fixed backoff."""
         for attempt in range(retries):
             try:
                 resp = requests.get(url, params=params, timeout=10)
@@ -35,25 +36,27 @@ class TAAPIClient:
             except requests.HTTPError as e:
                 # Retry on rate limit (429) or server errors (500+)
                 if (e.response.status_code == 429 or e.response.status_code >= 500) and attempt < retries - 1:
-                    wait = backoff * (2 ** attempt)
+                    wait = backoff
                     if e.response.status_code == 429:
-                        logging.warning(f"TAAPI rate limit (429) hit, retrying in {wait}s (attempt {attempt + 1}/{retries})")
+                        logging.warning(
+                            f"TAAPI rate limit (429) hit, retrying in {wait}s (attempt {attempt + 1}/{retries})"
+                        )
                     else:
-                        logging.warning(f"TAAPI {e.response.status_code}, retrying in {wait}s")
+                        logging.warning(f"TAAPI {e.response.status_code}, retrying in {wait}s (attempt {attempt + 1}/{retries})")
                     time.sleep(wait)
                 else:
                     raise
             except requests.Timeout as e:
                 if attempt < retries - 1:
-                    wait = backoff * (2 ** attempt)
-                    logging.warning(f"TAAPI timeout, retrying in {wait}s")
+                    wait = backoff
+                    logging.warning(f"TAAPI timeout, retrying in {wait}s (attempt {attempt + 1}/{retries})")
                     time.sleep(wait)
                 else:
                     raise
         raise RuntimeError("Max retries exceeded")
 
-    def _post_with_retry(self, url, payload, retries=3, backoff=0.5):
-        """Perform a POST request with exponential backoff retry logic."""
+    def _post_with_retry(self, url, payload, retries=10, backoff=5.0):
+        """Perform a POST request with retry logic and fixed backoff."""
         for attempt in range(retries):
             try:
                 resp = requests.post(url, json=payload, timeout=15)
@@ -62,18 +65,22 @@ class TAAPIClient:
             except requests.HTTPError as e:
                 # Retry on rate limit (429) or server errors (500+)
                 if (e.response.status_code == 429 or e.response.status_code >= 500) and attempt < retries - 1:
-                    wait = backoff * (2 ** attempt)
+                    wait = backoff
                     if e.response.status_code == 429:
-                        logging.warning(f"TAAPI Bulk rate limit (429), retrying in {wait}s (attempt {attempt + 1}/{retries})")
+                        logging.warning(
+                            f"TAAPI Bulk rate limit (429), retrying in {wait}s (attempt {attempt + 1}/{retries})"
+                        )
                     else:
-                        logging.warning(f"TAAPI Bulk {e.response.status_code}, retrying in {wait}s")
+                        logging.warning(
+                            f"TAAPI Bulk {e.response.status_code}, retrying in {wait}s (attempt {attempt + 1}/{retries})"
+                        )
                     time.sleep(wait)
                 else:
                     raise
             except requests.Timeout as e:
                 if attempt < retries - 1:
-                    wait = backoff * (2 ** attempt)
-                    logging.warning(f"TAAPI Bulk timeout, retrying in {wait}s")
+                    wait = backoff
+                    logging.warning(f"TAAPI Bulk timeout, retrying in {wait}s (attempt {attempt + 1}/{retries})")
                     time.sleep(wait)
                 else:
                     raise
@@ -137,6 +144,24 @@ class TAAPIClient:
                     if indicator_id:
                         results[indicator_id] = item.get("result")
 
+            # Log raw response (truncated) for debugging
+            try:
+                logging.debug(
+                    "TAAPI bulk raw response for %s %s: %s",
+                    symbol,
+                    interval,
+                    json.dumps(response, ensure_ascii=False)[:1000],
+                )
+                logging.debug(
+                    "TAAPI bulk parsed ids for %s %s: %s",
+                    symbol,
+                    interval,
+                    list(results.keys()),
+                )
+            except Exception:
+                # Logging should never break indicator fetching
+                pass
+
             return results
 
         except Exception as e:
@@ -164,20 +189,20 @@ class TAAPIClient:
                        "macd": [...], "rsi14": [...]}
             }
         """
-        # Check cache first (for current interval from config)
-        interval = CONFIG.get("interval", "1h")
-        
+        # Use a fixed long-term interval for structural context (decoupled from trading loop interval)
+        long_term_interval = "4h"
+
         # Try to get cached data for both intervals
         if self.enable_cache and self.cache:
             cached_5m = self.cache.get(asset, "5m")
-            cached_interval = self.cache.get(asset, interval)
-            
-            if cached_5m and cached_interval:
-                logging.info(f"Using cached indicators for {asset} (5m + {interval})")
-                return {"5m": cached_5m, interval: cached_interval}
-        
+            cached_long_term = self.cache.get(asset, long_term_interval)
+
+            if cached_5m and cached_long_term:
+                logging.info(f"使用缓存的技术指标：{asset}（5m + {long_term_interval}）")
+                return {"5m": cached_5m, long_term_interval: cached_long_term}
+
         symbol = f"{asset}/USDT"
-        result = {"5m": {}, interval: {}}
+        result = {"5m": {}, long_term_interval: {}}
 
         # Bulk request for 5m indicators
         # Note: Free plan limit is 20 calculations per request
@@ -197,9 +222,9 @@ class TAAPIClient:
         result["5m"]["rsi7"] = self._extract_series(bulk_5m.get("rsi7"), "value")
         result["5m"]["rsi14"] = self._extract_series(bulk_5m.get("rsi14"), "value")
 
-        # Wait 15 seconds to respect Free plan rate limit (1 request per 15 seconds)
-        logging.info(f"Waiting 15s for TAAPI rate limit (Free plan: 1 req/15s)...")
-        time.sleep(15)
+        # Wait 30 seconds to respect Free plan rate limit (assume 1 request per 30 seconds to be safe)
+        logging.info("等待 30 秒以遵守 TAAPI 免费套餐速率限制（约 1 次 / 30 秒）…")
+        time.sleep(30)
 
         # Bulk request for 4h indicators
         # Note: 4 single values (4 calc) + MACD (5 calc) + RSI14 (5 calc) = 14 calculations
@@ -215,18 +240,51 @@ class TAAPIClient:
         bulk_4h = self.fetch_bulk_indicators(symbol, "4h", indicators_4h)
 
         # Extract values and series
-        result[interval]["ema20"] = self._extract_value(bulk_4h.get("ema20"))
-        result[interval]["ema50"] = self._extract_value(bulk_4h.get("ema50"))
-        result[interval]["atr3"] = self._extract_value(bulk_4h.get("atr3"))
-        result[interval]["atr14"] = self._extract_value(bulk_4h.get("atr14"))
-        result[interval]["macd"] = self._extract_series(bulk_4h.get("macd"), "valueMACD")
-        result[interval]["rsi14"] = self._extract_series(bulk_4h.get("rsi14"), "value")
+        result[long_term_interval]["ema20"] = self._extract_value(bulk_4h.get("ema20"))
+        result[long_term_interval]["ema50"] = self._extract_value(bulk_4h.get("ema50"))
+        result[long_term_interval]["atr3"] = self._extract_value(bulk_4h.get("atr3"))
+        result[long_term_interval]["atr14"] = self._extract_value(bulk_4h.get("atr14"))
+        result[long_term_interval]["macd"] = self._extract_series(bulk_4h.get("macd"), "valueMACD")
+        result[long_term_interval]["rsi14"] = self._extract_series(bulk_4h.get("rsi14"), "value")
+
+        # Log missing/empty indicators for easier debugging
+        try:
+            ema20_5m = result["5m"].get("ema20")
+            macd_5m = result["5m"].get("macd")
+            rsi7_5m = result["5m"].get("rsi7")
+            rsi14_5m = result["5m"].get("rsi14")
+            ema20_lt = result[long_term_interval].get("ema20")
+            ema50_lt = result[long_term_interval].get("ema50")
+            atr3_lt = result[long_term_interval].get("atr3")
+            atr14_lt = result[long_term_interval].get("atr14")
+            macd_lt = result[long_term_interval].get("macd")
+            rsi14_lt = result[long_term_interval].get("rsi14")
+
+            all_5m_empty = not any([ema20_5m, macd_5m, rsi7_5m, rsi14_5m])
+            all_lt_empty = not any([ema20_lt, ema50_lt, atr3_lt, atr14_lt, macd_lt, rsi14_lt])
+
+            if all_5m_empty or all_lt_empty:
+                logging.warning(
+                    "TAAPI 指标不完整：%s 5m_empty=%s 4h_empty=%s | bulk_5m=%s | bulk_4h=%s",
+                    asset,
+                    all_5m_empty,
+                    all_lt_empty,
+                    json.dumps(bulk_5m, ensure_ascii=False)[:800],
+                    json.dumps(bulk_4h, ensure_ascii=False)[:800],
+                )
+                # If both intraday and long-term indicators are completely missing,
+                # treat this as a hard failure so upper layers can skip this cycle.
+                if all_5m_empty and all_lt_empty:
+                    raise RuntimeError(f"TAAPI returned no usable indicators for {asset}")
+        except Exception:
+            # 仅用于调试，不影响正常返回
+            pass
 
         # Cache the results
         if self.enable_cache and self.cache:
             self.cache.set(asset, "5m", result["5m"])
-            self.cache.set(asset, interval, result[interval])
-            logging.info(f"Cached indicators for {asset} (5m + {interval})")
+            self.cache.set(asset, long_term_interval, result[long_term_interval])
+            logging.info(f"已缓存技术指标：{asset}（5m + {long_term_interval}）")
 
         return result
 

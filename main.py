@@ -3,6 +3,7 @@ AI Trading Bot - NiceGUI Desktop Application
 Entry point for the application
 """
 
+import logging
 import signal
 import sys
 import asyncio
@@ -43,6 +44,15 @@ if __name__ in {"__main__", "__mp_main__"}:
 
     # Register cleanup on exit
     atexit.register(cleanup)
+
+    # Ensure logs are human-readable in the terminal
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=[
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
 
     # Import and setup app on startup
     from src.gui.app import create_app, bot_service

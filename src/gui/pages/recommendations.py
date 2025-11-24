@@ -5,10 +5,19 @@ Recommendations Page - AI trade proposals for manual approval
 from nicegui import ui
 from src.gui.services.bot_service import BotService
 from src.gui.services.state_manager import StateManager
+from src.backend.config_loader import CONFIG
 
 
 def create_recommendations(bot_service: BotService, state_manager: StateManager):
     """Create recommendations page with pending AI proposals"""
+
+    trading_mode = (CONFIG.get('trading_mode') or 'auto').lower()
+    banner_title = 'Manual Trading Mode' if trading_mode == 'manual' else 'Auto Trading Mode'
+    banner_body = (
+        'AI analyzes the market and proposes trades. Review and approve/reject each proposal.'
+        if trading_mode == 'manual'
+        else 'AI analyzes the market and executes trades automatically when confidence criteria are met.'
+    )
     
     ui.label('🤖 AI Recommendations').classes('text-3xl font-bold mb-4 text-white')
     
@@ -17,8 +26,8 @@ def create_recommendations(bot_service: BotService, state_manager: StateManager)
         with ui.row().classes('items-center gap-3'):
             ui.icon('info', size='24px').classes('text-blue-300')
             with ui.column().classes('gap-1'):
-                ui.label('Manual Trading Mode').classes('text-lg font-bold text-white')
-                ui.label('AI analyzes the market and proposes trades. Review and approve/reject each proposal.').classes('text-sm text-blue-200')
+                ui.label(banner_title).classes('text-lg font-bold text-white')
+                ui.label(banner_body).classes('text-sm text-blue-200')
     
     # Container for proposals
     proposals_container = ui.column().classes('w-full gap-4')
