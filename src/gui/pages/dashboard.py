@@ -13,27 +13,32 @@ def create_dashboard(bot_service: BotService, state_manager: StateManager):
 
     ui.label('Dashboard').classes('text-3xl font-bold mb-4 text-white')
 
-    # ===== METRICS CARDS (4 cards in grid) =====
-    with ui.grid(columns=4).classes('w-full gap-4 mb-6'):
-        # Card 1: Total Balance
+    # ===== METRICS CARDS (5 cards in grid) =====
+    with ui.grid(columns=5).classes('w-full gap-4 mb-6'):
+        # Card 1: Total Equity (总权益)
         with ui.card().classes('metric-card'):
-            balance_value = ui.label('$0.00').classes('text-4xl font-bold text-white')
-            ui.label('Total Balance').classes('text-sm text-gray-200 mt-2')
+            total_equity_value = ui.label('$0.00').classes('text-4xl font-bold text-white')
+            ui.label('总权益 (Total Equity)').classes('text-sm text-gray-200 mt-2')
 
-        # Card 2: Total Return
+        # Card 2: Available USDT (可用USDT)
+        with ui.card().classes('metric-card'):
+            available_usdt_value = ui.label('$0.00').classes('text-4xl font-bold text-white')
+            ui.label('可用资金 (Available)').classes('text-sm text-gray-200 mt-2')
+
+        # Card 3: Profit/Loss (盈亏金额)
+        with ui.card().classes('metric-card'):
+            pnl_value = ui.label('$0.00').classes('text-4xl font-bold text-white')
+            ui.label('盈亏 (P&L)').classes('text-sm text-gray-200 mt-2')
+
+        # Card 4: Total Return (收益率)
         with ui.card().classes('metric-card'):
             return_value = ui.label('+0.00%').classes('text-4xl font-bold text-white')
-            ui.label('Total Return').classes('text-sm text-gray-200 mt-2')
+            ui.label('收益率 (Return)').classes('text-sm text-gray-200 mt-2')
 
-        # Card 3: Sharpe Ratio
-        with ui.card().classes('metric-card'):
-            sharpe_value = ui.label('0.00').classes('text-4xl font-bold text-white')
-            ui.label('Sharpe Ratio').classes('text-sm text-gray-200 mt-2')
-
-        # Card 4: Active Positions
+        # Card 5: Active Positions
         with ui.card().classes('metric-card'):
             positions_value = ui.label('0').classes('text-4xl font-bold text-white')
-            ui.label('Active Positions').classes('text-sm text-gray-200 mt-2')
+            ui.label('持仓数 (Positions)').classes('text-sm text-gray-200 mt-2')
 
     # ===== CHARTS ROW =====
     with ui.row().classes('w-full gap-4 mb-6'):
@@ -219,10 +224,27 @@ def create_dashboard(bot_service: BotService, state_manager: StateManager):
         try:
             state = state_manager.get_state()
 
-            # Update metrics cards
-            balance_value.text = f'${state.balance:,.2f}'
+            # Get initial capital from config
+            from src.backend.config_loader import CONFIG
+            initial_capital = float(CONFIG.get('initial_capital', 200))
 
-            # Return with color coding
+            # Update metrics cards
+            # Total Equity (总权益 = 可用余额 + 持仓价值)
+            total_equity = state.total_value if state.total_value > 0 else state.balance
+            total_equity_value.text = f'${total_equity:,.2f}'
+
+            # Available USDT (可用资金)
+            available_usdt_value.text = f'${state.balance:,.2f}'
+
+            # Profit/Loss (盈亏金额)
+            pnl_amount = total_equity - initial_capital
+            pnl_value.text = f'${pnl_amount:+,.2f}'
+            if pnl_amount >= 0:
+                pnl_value.classes(remove='text-red-500', add='text-green-500')
+            else:
+                pnl_value.classes(remove='text-green-500', add='text-red-500')
+
+            # Return with color coding (收益率)
             return_pct = state.total_return_pct
             return_value.text = f'{return_pct:+.2f}%'
             if return_pct >= 0:
@@ -230,7 +252,7 @@ def create_dashboard(bot_service: BotService, state_manager: StateManager):
             else:
                 return_value.classes(remove='text-green-500', add='text-red-500')
 
-            sharpe_value.text = f'{state.sharpe_ratio:.2f}'
+            # Active Positions
             positions_value.text = str(len(state.positions or []))
 
             # Update equity curve chart

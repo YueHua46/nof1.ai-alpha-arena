@@ -441,22 +441,6 @@ class TradingBotEngine:
 
                         action = decision.get('action')
                         rationale = decision.get('rationale', '')
-                        
-                        # ===== Handle HOLD action first (no need for allocation calculation) =====
-                        if action == 'hold':
-                            self.logger.info(f"\n{'='*60}")
-                            self.logger.info(f"⏸️  {asset}：保持观望（HOLD）")
-                            self.logger.info(f"{'='*60}")
-                            self.logger.info(f"理由：{rationale}\n")
-                            self._write_diary_entry({
-                                'timestamp': datetime.now(UTC).isoformat(),
-                                'asset': asset,
-                                'action': 'hold',
-                                'rationale': rationale
-                            })
-                            continue
-                        
-                        # ===== For BUY/SELL actions only =====
                         raw_allocation = float(decision.get('allocation_usd', 0))
                         tp_price = decision.get('tp_price')
                         sl_price = decision.get('sl_price')
@@ -467,39 +451,25 @@ class TradingBotEngine:
                         self.logger.info(f"\n{'='*60}")
                         self.logger.info(f"🎯 开始处理 {asset} 的 {action.upper()} 决策")
                         account_value = self.state.total_value or total_value
-                        
-                        # 获取当前杠杆倍数
-                        try:
-                            leverage = await self.exchange.get_leverage(asset)
-                        except Exception as e:
-                            self.logger.warning(f"获取 {asset} 杠杆失败，使用默认值10x：{e}")
-                            leverage = 10.0
-                        
-                        # 计算保证金分配（使用账户总权益的一定比例）
-                        max_margin_from_balance = max(account_value * self.position_risk_fraction, 0.0)
-                        # 根据杠杆计算实际持仓量（名义价值）
-                        max_allocation_from_balance = max_margin_from_balance * leverage
+                        # 使用账户总权益的一定比例作为本次下单资金上限（默认 10%）
+                        max_allocation_from_balance = max(account_value * self.position_risk_fraction, 0.0)
 
 
                         self.logger.info(f"💼 资金分配计算：")
                         self.logger.info(f"   账户总权益: ${account_value:,.2f} USDT")
-                        self.logger.info(f"   风险比例（保证金占比）: {self.position_risk_fraction * 100:.1f}%")
-                        self.logger.info(f"   当前杠杆: {leverage}x")
-                        self.logger.info(f"   最大保证金: ${max_margin_from_balance:,.2f} USDT")
-                        self.logger.info(f"   最大持仓量（名义价值）: ${max_allocation_from_balance:,.2f} USDT")
-                        self.logger.info(f"   LLM 建议持仓量: ${raw_allocation:,.2f} USDT")
+                        self.logger.info(f"   风险比例: {self.position_risk_fraction * 100:.1f}%")
+                        self.logger.info(f"   最大可用资金: ${max_allocation_from_balance:,.2f} USDT")
+                        self.logger.info(f"   LLM 建议资金: ${raw_allocation:,.2f} USDT")
                         # 如果 LLM 给出了 allocation_usd，把它当作“目标值”，但不允许超过上限
                         if raw_allocation > 0:
                             allocation = min(raw_allocation, max_allocation_from_balance)
                             if raw_allocation > max_allocation_from_balance:
-                                self.logger.info(f"   ⚠️  LLM 建议持仓量超过上限，已调整为最大持仓量")
+                                self.logger.info(f"   ⚠️  LLM 建议资金超过上限，已调整为最大可用资金")
                         else:
                             allocation = max_allocation_from_balance
 
-                        # 计算实际保证金占用
-                        actual_margin = allocation / leverage
-                        self.logger.info(f"   ✅ 最终持仓量: ${allocation:,.2f} USDT")
-                        self.logger.info(f"   ✅ 实际保证金占用: ${actual_margin:,.2f} USDT ({actual_margin/account_value*100:.1f}%)")
+
+                        self.logger.info(f"   ✅ 最终分配: ${allocation:,.2f} USDT")
                         self.logger.info(f"{'='*60}\n")
                         if allocation <= 0:
                             self.logger.warning(
@@ -693,6 +663,15 @@ class TradingBotEngine:
                                 self.logger.error(f"执行 {action} 操作（资产 {asset}）时出错：{e}")
                                 if self.on_error:
                                     self.on_error(f"Trade execution error: {e}")
+
+                        elif action == 'hold':
+                            self.logger.info(f"{asset}：保持持仓（HOLD），理由：{rationale}")
+                            self._write_diary_entry({
+                                'timestamp': datetime.now(UTC).isoformat(),
+                                'asset': asset,
+                                'action': 'hold',
+                                'rationale': rationale
+                            })
 
                     # Update market data in state for dashboard
                     self.state.market_data = market_sections

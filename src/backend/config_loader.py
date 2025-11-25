@@ -100,4 +100,7 @@ CONFIG = {
     # API server
     "api_host": _get_env("API_HOST", "0.0.0.0"),
     "api_port": _get_env("APP_PORT") or _get_env("API_PORT") or "3000",
+
+    # Risk management
+    "position_risk_fraction": float(_get_env("POSITION_RISK_FRACTION", "0.1")),
 }

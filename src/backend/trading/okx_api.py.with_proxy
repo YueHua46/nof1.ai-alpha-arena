@@ -23,14 +23,43 @@ class OKXAPI:
         if not all([self.api_key, self.secret_key, self.passphrase]):
             raise ValueError("Missing OKX credentials (OKX_API_KEY, OKX_SECRET_KEY, OKX_PASSPHRASE)")
 
-        self.exchange = ccxt.okx({
+        # Configure proxy if available (required for mainland China)
+        proxy_config = {}
+        http_proxy = CONFIG.get("http_proxy") or CONFIG.get("HTTP_PROXY")
+        https_proxy = CONFIG.get("https_proxy") or CONFIG.get("HTTPS_PROXY")
+        socks5_proxy = CONFIG.get("socks5_proxy") or CONFIG.get("SOCKS5_PROXY")
+        
+        if socks5_proxy:
+            proxy_config['httpProxy'] = socks5_proxy
+            proxy_config['httpsProxy'] = socks5_proxy
+            logging.info(f"🌐 使用 SOCKS5 代理：{socks5_proxy}")
+        elif https_proxy:
+            proxy_config['httpProxy'] = https_proxy
+            proxy_config['httpsProxy'] = https_proxy
+            logging.info(f"🌐 使用 HTTPS 代理：{https_proxy}")
+        elif http_proxy:
+            proxy_config['httpProxy'] = http_proxy
+            proxy_config['httpsProxy'] = http_proxy
+            logging.info(f"🌐 使用 HTTP 代理：{http_proxy}")
+        else:
+            logging.warning("⚠️  未配置代理。如果在中国大陆，OKX 可能无法访问！")
+
+        exchange_config = {
             'apiKey': self.api_key,
             'secret': self.secret_key,
             'password': self.passphrase,
+            'timeout': 30000,  # 30 seconds timeout
+            'enableRateLimit': True,  # Enable rate limiting
             'options': {
                 'defaultType': 'swap',  # Target perpetual swaps by default
             }
-        })
+        }
+        
+        # Add proxy if configured
+        if proxy_config:
+            exchange_config.update(proxy_config)
+        
+        self.exchange = ccxt.okx(exchange_config)
 
         if self.flag == '0':
             self.exchange.set_sandbox_mode(True)
@@ -46,14 +75,35 @@ class OKXAPI:
         await self.exchange.close()
 
     async def _ensure_markets(self):
-        """Ensure markets are loaded."""
+        """Ensure markets are loaded with retry mechanism."""
         if not self.markets_loaded:
-            try:
-                await self.exchange.load_markets()
-                self.markets_loaded = True
-            except Exception as e:
-                logging.error(f"Failed to load markets: {e}")
-                raise
+            max_retries = 3
+            retry_delay = 5  # seconds
+            
+            for attempt in range(max_retries):
+                try:
+                    logging.info(f"🔄 加载市场信息... (尝试 {attempt + 1}/{max_retries})")
+                    await self.exchange.load_markets()
+                    self.markets_loaded = True
+                    logging.info("✅ 市场信息加载成功")
+                    return
+                except Exception as e:
+                    error_msg = str(e)
+                    if "Host is down" in error_msg or "Cannot connect" in error_msg or "Timeout" in error_msg:
+                        logging.error(f"❌ 网络连接失败 (尝试 {attempt + 1}/{max_retries}): {error_msg}")
+                        if attempt < max_retries - 1:
+                            logging.info(f"⏳ 等待 {retry_delay} 秒后重试...")
+                            await asyncio.sleep(retry_delay)
+                            retry_delay *= 2  # Exponential backoff
+                        else:
+                            logging.error("❌ 无法连接到 OKX 服务器。请检查：")
+                            logging.error("   1. 网络连接是否正常")
+                            logging.error("   2. 如果在中国大陆，请配置代理（.env 文件中的 HTTP_PROXY/HTTPS_PROXY/SOCKS5_PROXY）")
+                            logging.error("   3. 代理软件是否正常运行")
+                            raise ConnectionError(f"无法连接到 OKX: {error_msg}") from e
+                    else:
+                        logging.error(f"加载市场信息失败: {e}")
+                        raise
 
     def _get_symbol(self, asset: str) -> str:
         """Convert simple asset name to CCXT symbol (e.g. 'BTC' -> 'BTC/USDT:USDT')."""
@@ -148,34 +198,6 @@ class OKXAPI:
             # 保守降级到 net_mode（不传 posSide）
             self._position_mode = "net_mode"
             logging.error(f"获取 OKX 持仓模式失败，将按 net_mode 处理：{e}")
-    
-    async def get_leverage(self, asset: str) -> float:
-        """
-        获取指定资产的当前杠杆倍数
-        
-        Args:
-            asset: 资产名称，如 'BTC'
-            
-        Returns:
-            杠杆倍数，如 10.0 表示10倍杠杆
-        """
-        await self._ensure_markets()
-        inst_id = self._get_inst_id(asset)
-        
-        try:
-            # 获取杠杆信息
-            res = await self.exchange.private_get_account_leverage_info({'instId': inst_id, 'mgnMode': 'cross'})
-            if res.get('code') == '0' and res.get('data'):
-                data = res['data'][0] if res['data'] else {}
-                leverage = float(data.get('lever', 1.0))
-                logging.info(f"📊 {asset} 当前杠杆：{leverage}x")
-                return leverage
-            else:
-                logging.warning(f"获取 {asset} 杠杆信息失败，返回默认值10x")
-                return 10.0
-        except Exception as e:
-            logging.error(f"获取 {asset} 杠杆信息时出错：{e}，返回默认值10x")
-            return 10.0
 
     async def get_user_state(self) -> Dict[str, Any]:
         """Retrieve wallet state and positions."""
